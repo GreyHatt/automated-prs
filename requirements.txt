@@ -1,6 +1,5 @@
 black
 flake8
-pylint
 isort
 autopep8
 google-cloud

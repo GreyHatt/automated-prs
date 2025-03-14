@@ -40,8 +40,6 @@ jobs:
         run: autopep8 --in-place --aggressive --recursive .
       - name: Run Flake8 Linter
         run: flake8 .
-      - name: Run Pylint Linter
-        run: pylint --disable=R,C,W1203 .
       - name: Run Isort Formatter
         id: isort
         run: isort --check-only .

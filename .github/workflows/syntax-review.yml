@@ -1,10 +1,10 @@
-name: Syntax and Lint check
+name: First Stage Review
 on:
   pull_request:
     types: [opened, synchronize]
 
 jobs:
-  pr-review:
+  first-stage-review:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

@@ -14,22 +14,18 @@ jobs:
         uses: actions/checkout@v3
         with:
           ref: ${{ github.head_ref }}  # Check out the PR branch
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install black flake8 pylint isort autopep8
-
+          pip install -r requirements.txt
       - name: Run Black Formatter
         id: black
         run: black --check .
         continue-on-error: true
-
       - name: Reformat code with Black
         if: steps.black.outcome == 'failure'
         run: |
@@ -40,21 +36,16 @@ jobs:
           git commit -am "Apply Black formatter"
           git pull --rebase origin ${{ github.head_ref }}  # Pull latest changes
           git push origin HEAD:${{ github.head_ref }}  # Push to the PR branch
-
       - name: Run autopep8
         run: autopep8 --in-place --aggressive --recursive .
-
       - name: Run Flake8 Linter
         run: flake8 .
-
       - name: Run Pylint Linter
         run: pylint --disable=R,C,W1203 .
-
       - name: Run Isort Formatter
         id: isort
         run: isort --check-only .
         continue-on-error: true
-
       - name: Reformat code with Isort
         if: steps.isort.outcome == 'failure'
         run: |

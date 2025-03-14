@@ -1,6 +1,7 @@
 import os
-from google.cloud import automl_v1beta1 as automl
+
 from github import Github
+from google.cloud import automl_v1beta1 as automl
 
 
 def get_diff_content():

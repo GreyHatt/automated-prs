@@ -1,4 +1,5 @@
 name: First Stage Review
+
 on:
   pull_request:
     types: [opened, synchronize]
@@ -6,37 +7,61 @@ on:
 jobs:
   first-stage-review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Grant write permissions to GITHUB_TOKEN
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/checkout@v3
         with:
-          python-version: '3.9'
+          ref: ${{ github.head_ref }}  # Check out the PR branch
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install black flake8 pylint isort
+          pip install black flake8 pylint isort autopep8
+
       - name: Run Black Formatter
+        id: black
+        run: black --check .
+        continue-on-error: true
+
+      - name: Reformat code with Black
+        if: steps.black.outcome == 'failure'
         run: |
-          black --check .
-          if [ $? -eq 1 ]; then
-            black .
-            git config --global user.name 'GitHub Actions'
-            git config --global user.email 'actions@github.com'
-            git commit -am "Apply Black Formatter"
-            git push
-            echo "Black formatter found issues in the code"
-          fi
+          black .
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add .
+          git commit -am "Apply Black formatter"
+          git pull --rebase origin ${{ github.head_ref }}  # Pull latest changes
+          git push origin HEAD:${{ github.head_ref }}  # Push to the PR branch
+
+      - name: Run autopep8
+        run: autopep8 --in-place --aggressive --recursive .
+
       - name: Run Flake8 Linter
         run: flake8 .
+
       - name: Run Pylint Linter
         run: pylint --disable=R,C,W1203 .
+
       - name: Run Isort Formatter
+        id: isort
+        run: isort --check-only .
+        continue-on-error: true
+
+      - name: Reformat code with Isort
+        if: steps.isort.outcome == 'failure'
         run: |
-          isort --check-only .
-          if [ $? -eq 1 ]; then
-            isort .
-            git commit -am "Apply Isort Formatter"
-            git push
-          fi
+          isort .
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add .
+          git commit -am "Apply Isort formatter"
+          git pull --rebase origin ${{ github.head_ref }}  # Pull latest changes
+          git push origin HEAD:${{ github.head_ref }}  # Push to the PR branch

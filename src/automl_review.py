@@ -14,7 +14,7 @@ def get_diff_content():
 
 def analyze_code(content):
     client = automl.PredictionServiceClient()
-    model_path = f"projects/{os.getenv("GCP_PROJECT_ID")}/locations/{os.getenv("REGION")}/models/{os.getenv("MODEL_ID")}"
+    model_path = f"""projects/{os.getenv("GCP_PROJECT_ID")}/locations/{os.getenv("REGION")}/models/{os.getenv("MODEL_ID")}"""
     payload = {"text_snippet": {"content": content, "mime_type": "text/plain"}}
     response = client.predict(name=model_path, payload=payload)
     return response

@@ -1,0 +1,42 @@
+name: Syntax and Lint check
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black flake8 pylint isort
+      - name: Run Black Formatter
+        run: |
+          black --check .
+          if [ $? -eq 1 ]; then
+            black .
+            git config --global user.name 'GitHub Actions'
+            git config --global user.email 'actions@github.com'
+            git commit -am "Apply Black Formatter"
+            git push
+            echo "Black formatter found issues in the code"
+          fi
+      - name: Run Flake8 Linter
+        run: flake8 .
+      - name: Run Pylint Linter
+        run: pylint --disable=R,C,W1203 .
+      - name: Run Isort Formatter
+        run: |
+          isort --check-only .
+          if [ $? -eq 1 ]; then
+            isort .
+            git commit -am "Apply Isort Formatter"
+            git push
+          fi

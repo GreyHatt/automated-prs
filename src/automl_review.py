@@ -97,59 +97,85 @@ class CodeReviewer:
                 continue
                 
         return changed_files
-
+    
     def analyze_code(self, code_block):
-        """Enhanced code analysis to catch syntax errors and logical issues"""
+        """Enhanced code analysis with better error detection"""
         try:
-            # More specific prompt to catch errors
+            # More structured prompt with examples
             prompt = f"""
-            Analyze this Python or Javascript or JS code for:
-            1. Syntax errors (missing operators, incomplete statements)
-            2. Function issues (incorrect usage of functions, missing arguments, incorrect return values)
-            3. Code optimizations (inefficient code or redundant code)
-            4. Logical errors (incorrect operations, wrong operators, etc.)
-            5. Missing or incorrect use of predefined functions
-            6. Unnecessary variables or functions
-
-            Ignore whitespace and formatting unless it affects functionality.
+            Analyze this code for potential issues. Provide specific recommendations in this format:
             
-            Code:
+            [ISSUE TYPE]: [DESCRIPTION]
+            [SEVERITY]: [HIGH/MEDIUM/LOW]
+            [LOCATION]: [LINE NUMBER OR FUNCTION NAME]
+            [SUGGESTION]: [CONCRETE FIX]
+            
+            Check for:
+            1. Syntax errors (missing brackets, semicolons, invalid operators)
+            2. Function issues (wrong parameters, missing returns, incorrect usage)
+            3. Performance problems (nested loops, unnecessary computations)
+            4. Logical errors (incorrect conditions, wrong variable usage)
+            5. Security vulnerabilities (SQL injection, hardcoded secrets)
+            6. Code smells (long methods, duplicate code)
+            
+            Example findings:
+            - SYNTAX ERROR: Missing closing bracket in if statement
+            - FUNCTION ISSUE: Function 'calculate' expects 3 parameters but called with 2
+            - OPTIMIZATION: Loop can be simplified using map()
+            - LOGIC ERROR: Condition will always evaluate to true
+            
+            Code to analyze:
             {code_block}
             
-            Issues Found:
+            Findings:
             """
             
             inputs = self.tokenizer(
                 prompt, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=1024
+                max_length=2048  # Increased for more context
             ).to(self.model.device)
             
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=200,
+                    max_new_tokens=400,  # Increased for more detailed analysis
                     num_beams=5,
                     early_stopping=True,
+                    temperature=0.7,  # Added for more creative suggestions
                     no_repeat_ngram_size=3
                 )
             
             suggestion = self.tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
             
-            # Filter for meaningful suggestions
-            if not suggestion or len(suggestion.split()) < 5:
+            # More sophisticated filtering
+            if not suggestion:
                 return None
                 
-            # Skip generic suggestions
+            # Skip only truly generic suggestions
             skip_phrases = [
+                'no issues found',
+                'looks good',
+                'no problems detected',
                 'add documentation',
                 'improve variable names',
                 'add comments',
                 'formatting',
                 'whitespace'
             ]
+            
+            # Keep suggestions that contain specific issue indicators
+            keep_indicators = [
+                'error', 'issue', 'warning', 'problem', 
+                'optimiz', 'improve', 'suggest', 'consider',
+                'vulnerability', 'risk', 'bug'
+            ]
+            
             if any(phrase.lower() in suggestion.lower() for phrase in skip_phrases):
+                return None
+                
+            if not any(indicator.lower() in suggestion.lower() for indicator in keep_indicators):
                 return None
                 
             return suggestion
@@ -157,9 +183,30 @@ class CodeReviewer:
         except Exception as e:
             print(f"Error analyzing code: {str(e)}")
             return None
+    
+    def validate_code_syntax(self, code_block, language):
+        """Basic syntax validation before sending to model"""
+        try:
+            if language == 'python':
+                # Simple Python syntax check
+                try:
+                    ast.parse(code_block)
+                except SyntaxError as e:
+                    return f"Syntax Error: {str(e)}"
+                    
+            elif language in ['javascript', 'typescript']:
+                # Basic JS syntax check patterns
+                if re.search(r'function\s+\w+\s*\([^)]*\)\s*{[^}]*$', code_block):
+                    return "Syntax Error: Missing closing brace in function"
+                if re.search(r'\([^)]*$', code_block):
+                    return "Syntax Error: Unclosed parentheses"
+                    
+            return None
+        except Exception:
+            return None
 
     def parse_patch(self, patch_text):
-        """Parse patch to get code changes with context"""
+        """Enhanced patch parsing with better context capture"""
         if not patch_text:
             return []
             
@@ -167,11 +214,22 @@ class CodeReviewer:
         current_line = None
         results = []
         current_hunk = []
+        context_lines = 3  # Number of surrounding lines to include
         
-        for line in lines:
+        for i, line in enumerate(lines):
             if line.startswith('@@ '):
                 if current_hunk and current_line is not None:
-                    code_block = '\n'.join([l[1:] if l.startswith('+') else l for l in current_hunk])
+                    # Include surrounding context
+                    start_idx = max(0, i - context_lines)
+                    end_idx = min(len(lines), i + context_lines + 1)
+                    context = lines[start_idx:end_idx]
+                    
+                    code_block = '\n'.join([
+                        l[1:] if l.startswith('+') else l 
+                        for l in current_hunk + context
+                        if not l.startswith('@')
+                    ])
+                    
                     if len(code_block.strip()) > 0:
                         results.append((current_line - len(current_hunk) + 1, code_block))
                 current_hunk = []
@@ -187,7 +245,7 @@ class CodeReviewer:
                     if line.startswith('+') and not line.startswith('++'):
                         current_line += 1
         
-        # Add the last hunk
+        # Add the last hunk with context
         if current_hunk and current_line is not None:
             code_block = '\n'.join([l[1:] if l.startswith('+') else l for l in current_hunk])
             if len(code_block.strip()) > 0:
@@ -196,7 +254,7 @@ class CodeReviewer:
         return results
 
     def run(self):
-        """Main execution flow with enhanced error detection"""
+        """Enhanced execution flow with better error detection"""
         try:
             pr = self.get_pr_details()
             changed_files = self.get_changed_files(pr)
@@ -208,19 +266,31 @@ class CodeReviewer:
             suggestions = []
             for file in changed_files:
                 print(f"\nAnalyzing {file['filename']}...")
+                file_ext = os.path.splitext(file['filename'])[1][1:].lower()
                 
                 if file['patch']:
                     for line_num, code in self.parse_patch(file['patch']):
-                        # Focus on lines with actual code changes
-                        if any(op in code for op in ['+', '-', '*', '/', '=', 'return']):
-                            suggestion = self.analyze_code(code)
-                            if suggestion:
-                                print(f"Found issue at line {line_num}: {suggestion[:100]}...")
-                                suggestions.append({
-                                    'filename': file['filename'],
-                                    'line_number': line_num,
-                                    'suggestion': suggestion
-                                })
+                        # First do basic syntax validation
+                        syntax_error = self.validate_code_syntax(code, file_ext)
+                        if syntax_error:
+                            suggestions.append({
+                                'filename': file['filename'],
+                                'line_number': line_num,
+                                'suggestion': syntax_error,
+                                'type': 'syntax'
+                            })
+                            continue
+                            
+                        # Then do deeper analysis
+                        suggestion = self.analyze_code(code)
+                        if suggestion:
+                            print(f"Found issue at line {line_num}: {suggestion[:100]}...")
+                            suggestions.append({
+                                'filename': file['filename'],
+                                'line_number': line_num,
+                                'suggestion': suggestion,
+                                'type': 'analysis'
+                            })
             
             if suggestions:
                 self.post_review(pr, suggestions)

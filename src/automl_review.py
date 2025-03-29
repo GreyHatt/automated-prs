@@ -16,13 +16,13 @@ class CodeReviewer:
         self.repo_name = os.getenv("GITHUB_REPOSITORY")
         self.event_path = os.getenv("GITHUB_EVENT_PATH")
         
-        # Files to skip (reviewer's own files)
+        # Files to skip
         self.skip_files = [
             'src/automl_review.py',
             '.github/workflows/'
         ]
         
-        # Initialize models with proper error handling
+        # Initialize models
         try:
             print("Initializing CodeReviewer model...")
             self.tokenizer = AutoTokenizer.from_pretrained("microsoft/codereviewer")
@@ -36,7 +36,7 @@ class CodeReviewer:
             print(f"Failed to load model: {str(e)}")
             raise
         
-        # Initialize GitHub client with retry
+        # Initialize GitHub client
         self.github = Github(
             self.gh_token,
             timeout=60,
@@ -45,68 +45,24 @@ class CodeReviewer:
         )
         self.repo = self.github.get_repo(self.repo_name)
 
-    def should_skip_file(self, filename):
-        """Check if file should be skipped"""
-        return any(skip in filename for skip in self.skip_files)
-
-    def get_pr_details(self):
-        """Fetch PR details with proper error handling"""
-        try:
-            with open(self.event_path, 'r') as f:
-                event_data = json.load(f)
-            pr_number = event_data['number']
-            print(f"Processing PR #{pr_number}")
-            return self.repo.get_pull(pr_number)
-        except Exception as e:
-            print(f"Failed to get PR details: {str(e)}")
-            raise
-
-    def get_changed_files(self, pr):
-        """Get changed files with robust error handling"""
-        changed_files = []
-        try:
-            comparison = self.repo.compare(pr.base.sha, pr.head.sha)
-            for file in comparison.files:
-                if file.status not in ['modified', 'added']:
-                    continue
-                if self.should_skip_file(file.filename):
-                    print(f"Skipping reviewer file: {file.filename}")
-                    continue
-                if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java', '.ts', '.go']):
-                    print(f"Skipping non-code file: {file.filename}")
-                    continue
-                
-                try:
-                    head_content = self.repo.get_contents(file.filename, ref=pr.head.sha).decoded_content.decode()
-                    changed_files.append({
-                        'filename': file.filename,
-                        'head_content': head_content,
-                        'patch': file.patch
-                    })
-                    print(f"Found changed file: {file.filename}")
-                except Exception as e:
-                    print(f"Couldn't get contents for {file.filename}: {str(e)}")
-        except Exception as e:
-            print(f"Failed to get changed files: {str(e)}")
-            raise
-        return changed_files
-
     def analyze_code(self, code_block):
-        """Analyze code with proper model configuration"""
+        """Enhanced code analysis to catch syntax errors and logical issues"""
         try:
+            # More specific prompt to catch errors
             prompt = f"""
-            Analyze this code for IMPORTANT issues only (ignore formatting/whitespace):
-            1. Actual bugs/errors
-            2. Security vulnerabilities
-            3. Performance issues
-            4. Major style violations
-            5. Architectural problems
+            Analyze this Python code for:
+            1. Syntax errors (missing operators, incomplete statements)
+            2. Logical errors (incorrect operations)
+            3. Undefined variables
+            4. Missing return values
+            5. Function definition issues
+
             Ignore whitespace and formatting unless it affects functionality.
             
             Code:
-            {code_block[:2000]}
+            {code_block}
             
-            Critical Issues Found:
+            Issues Found:
             """
             
             inputs = self.tokenizer(
@@ -127,13 +83,19 @@ class CodeReviewer:
             
             suggestion = self.tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
             
-            # Strict quality filtering
-            if (not suggestion or 
-                len(suggestion.split()) < 8 or
-                any(phrase in suggestion.lower() for phrase in [
-                    'whitespace', 'blank line', 'indentation',
-                    'space', 'formatting', 'extra line'
-                ])):
+            # Filter for meaningful suggestions
+            if not suggestion or len(suggestion.split()) < 5:
+                return None
+                
+            # Skip generic suggestions
+            skip_phrases = [
+                'add documentation',
+                'improve variable names',
+                'add comments',
+                'formatting',
+                'whitespace'
+            ]
+            if any(phrase.lower() in suggestion.lower() for phrase in skip_phrases):
                 return None
                 
             return suggestion
@@ -143,16 +105,22 @@ class CodeReviewer:
             return None
 
     def parse_patch(self, patch_text):
-        """Parse patch to get meaningful changes"""
+        """Parse patch to get code changes with context"""
         if not patch_text:
             return []
             
         lines = patch_text.split('\n')
         current_line = None
         results = []
+        current_hunk = []
         
         for line in lines:
             if line.startswith('@@ '):
+                if current_hunk and current_line is not None:
+                    code_block = '\n'.join([l[1:] if l.startswith('+') else l for l in current_hunk])
+                    if len(code_block.strip()) > 0:
+                        results.append((current_line - len(current_hunk) + 1, code_block))
+                current_hunk = []
                 parts = line.split(' ')
                 if len(parts) >= 3:
                     try:
@@ -160,42 +128,21 @@ class CodeReviewer:
                     except ValueError:
                         current_line = None
             elif current_line is not None:
-                if line.startswith('+') and not line.startswith('++'):
-                    results.append((current_line, line[1:]))
                 if line.startswith('+') or line.startswith(' '):
-                    current_line += 1
-                    
+                    current_hunk.append(line)
+                    if line.startswith('+') and not line.startswith('++'):
+                        current_line += 1
+        
+        # Add the last hunk
+        if current_hunk and current_line is not None:
+            code_block = '\n'.join([l[1:] if l.startswith('+') else l for l in current_hunk])
+            if len(code_block.strip()) > 0:
+                results.append((current_line - len(current_hunk) + 1, code_block))
+                
         return results
 
-    def post_review(self, pr, suggestions):
-        """Post review with all comments in one batch"""
-        if not suggestions:
-            print("No valid suggestions to post")
-            return False
-            
-        try:
-            comments = []
-            for item in suggestions:
-                comments.append({
-                    'path': item['filename'],
-                    'position': item['line_number'],
-                    'body': f"🔍 **Code Review**:\n\n{item['suggestion']}\n\n**Impact**: {item['filename']} line {item['line_number']}"
-                })
-            
-            pr.create_review(
-                commit=pr.head.sha,
-                body="Automated code review completed",
-                event="COMMENT",
-                comments=comments
-            )
-            print(f"Posted {len(comments)} comments successfully")
-            return True
-        except Exception as e:
-            print(f"Failed to post review: {str(e)}")
-            return False
-
     def run(self):
-        """Main execution flow"""
+        """Main execution flow with enhanced error detection"""
         try:
             pr = self.get_pr_details()
             changed_files = self.get_changed_files(pr)
@@ -210,13 +157,16 @@ class CodeReviewer:
                 
                 if file['patch']:
                     for line_num, code in self.parse_patch(file['patch']):
-                        suggestion = self.analyze_code(code)
-                        if suggestion:
-                            suggestions.append({
-                                'filename': file['filename'],
-                                'line_number': line_num,
-                                'suggestion': suggestion
-                            })
+                        # Focus on lines with actual code changes
+                        if any(op in code for op in ['+', '-', '*', '/', '=', 'return']):
+                            suggestion = self.analyze_code(code)
+                            if suggestion:
+                                print(f"Found issue at line {line_num}: {suggestion[:100]}...")
+                                suggestions.append({
+                                    'filename': file['filename'],
+                                    'line_number': line_num,
+                                    'suggestion': suggestion
+                                })
             
             if suggestions:
                 self.post_review(pr, suggestions)

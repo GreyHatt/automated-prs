@@ -4,3 +4,8 @@ isort
 autopep8
 google-cloud
 PyGithub
+transformers
+google-cloud-aiplatform
+PyGithub
+diff-match-patch
+python-dotenv

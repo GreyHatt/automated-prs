@@ -2,10 +2,10 @@ import os
 import json
 import time
 import re
+import torch
 from github import Github, GithubException
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from dotenv import load_dotenv
-import torch
 
 load_dotenv()
 
@@ -22,7 +22,7 @@ class CodeReviewer:
             '.github/workflows/'
         ]
         
-        # Initialize models with proper configuration
+        # Initialize models with proper error handling
         try:
             print("Initializing CodeReviewer model...")
             self.tokenizer = AutoTokenizer.from_pretrained("microsoft/codereviewer")
@@ -36,37 +36,77 @@ class CodeReviewer:
             print(f"Failed to load model: {str(e)}")
             raise
         
-        # Initialize GitHub client with retry logic
+        # Initialize GitHub client with retry
+        self.github = Github(
+            self.gh_token,
+            timeout=60,
+            per_page=100,
+            retry=3
+        )
+        self.repo = self.github.get_repo(self.repo_name)
+
+    def should_skip_file(self, filename):
+        """Check if file should be skipped"""
+        return any(skip in filename for skip in self.skip_files)
+
+    def get_pr_details(self):
+        """Fetch PR details with proper error handling"""
         try:
-            self.github = Github(
-                self.gh_token,
-                timeout=60,
-                per_page=100,
-                retry=3
-            )
-            self.repo = self.github.get_repo(self.repo_name)
-        except GithubException as e:
-            print(f"GitHub API connection failed: {str(e)}")
+            with open(self.event_path, 'r') as f:
+                event_data = json.load(f)
+            pr_number = event_data['number']
+            print(f"Processing PR #{pr_number}")
+            return self.repo.get_pull(pr_number)
+        except Exception as e:
+            print(f"Failed to get PR details: {str(e)}")
             raise
 
-    def analyze_code(self, file_content):
-        """Analyze code using the model with proper configuration"""
+    def get_changed_files(self, pr):
+        """Get changed files with robust error handling"""
+        changed_files = []
+        try:
+            comparison = self.repo.compare(pr.base.sha, pr.head.sha)
+            for file in comparison.files:
+                if file.status not in ['modified', 'added']:
+                    continue
+                if self.should_skip_file(file.filename):
+                    print(f"Skipping reviewer file: {file.filename}")
+                    continue
+                if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java', '.ts', '.go']):
+                    print(f"Skipping non-code file: {file.filename}")
+                    continue
+                
+                try:
+                    head_content = self.repo.get_contents(file.filename, ref=pr.head.sha).decoded_content.decode()
+                    changed_files.append({
+                        'filename': file.filename,
+                        'head_content': head_content,
+                        'patch': file.patch
+                    })
+                    print(f"Found changed file: {file.filename}")
+                except Exception as e:
+                    print(f"Couldn't get contents for {file.filename}: {str(e)}")
+        except Exception as e:
+            print(f"Failed to get changed files: {str(e)}")
+            raise
+        return changed_files
+
+    def analyze_code(self, code_block):
+        """Analyze code with proper model configuration"""
         try:
             prompt = f"""
-            Analyze this code for specific improvements in these categories:
-            1. BUGS - Actual code errors that will cause failures.
-            2. SECURITY - Potential security vulnerabilities
-            3. PERFORMANCE - Optimizations for speed/memory
-            4. STYLE - Code style violations (PEP8, etc)
-            5. BEST PRACTICES - Better ways to implement
-            
+            Analyze this code for IMPORTANT issues only (ignore formatting/whitespace):
+            1. Actual bugs/errors
+            2. Security vulnerabilities
+            3. Performance issues
+            4. Major style violations
+            5. Architectural problems
             Ignore whitespace and formatting unless it affects functionality.
-            Provide concrete suggestions with explanations.
             
             Code:
-            {file_content[:2000]}
+            {code_block[:2000]}
             
-            Significant Issues Found:
+            Critical Issues Found:
             """
             
             inputs = self.tokenizer(
@@ -82,100 +122,80 @@ class CodeReviewer:
                     max_new_tokens=200,
                     num_beams=5,
                     early_stopping=True,
-                    do_sample=False,  # Disable sampling for deterministic results
-                    temperature=1.0,   # Neutral temperature when do_sample=False
                     no_repeat_ngram_size=3
                 )
             
-            suggestion = self.tokenizer.decode(
-                outputs[0], 
-                skip_special_tokens=True
-            )
+            suggestion = self.tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
             
-            # Strict filtering of suggestions
-            suggestion = suggestion.strip()
-            if not suggestion:
-                return None
-                
-            # Skip if suggestion is too short or doesn't contain actionable items
-            if len(suggestion.split()) < 8:
-                return None
-                
-            # Skip formatting-related suggestions
-            formatting_phrases = [
-                'whitespace', 'blank line', 'indentation', 
-                'space', 'formatting', 'extra line', 'remove line'
-            ]
-            if any(phrase in suggestion.lower() for phrase in formatting_phrases):
+            # Strict quality filtering
+            if (not suggestion or 
+                len(suggestion.split()) < 8 or
+                any(phrase in suggestion.lower() for phrase in [
+                    'whitespace', 'blank line', 'indentation',
+                    'space', 'formatting', 'extra line'
+                ])):
                 return None
                 
             return suggestion
             
         except Exception as e:
-            print(f"Failed to analyze code: {str(e)}")
+            print(f"Error analyzing code: {str(e)}")
             return None
 
-    def post_comments(self, pr, all_suggestions):
-        """Post all comments with proper error handling"""
-        if not all_suggestions:
+    def parse_patch(self, patch_text):
+        """Parse patch to get meaningful changes"""
+        if not patch_text:
+            return []
+            
+        lines = patch_text.split('\n')
+        current_line = None
+        results = []
+        
+        for line in lines:
+            if line.startswith('@@ '):
+                parts = line.split(' ')
+                if len(parts) >= 3:
+                    try:
+                        current_line = int(parts[2].split(',')[0][1:])
+                    except ValueError:
+                        current_line = None
+            elif current_line is not None:
+                if line.startswith('+') and not line.startswith('++'):
+                    results.append((current_line, line[1:]))
+                if line.startswith('+') or line.startswith(' '):
+                    current_line += 1
+                    
+        return results
+
+    def post_review(self, pr, suggestions):
+        """Post review with all comments in one batch"""
+        if not suggestions:
             print("No valid suggestions to post")
             return False
-
+            
         try:
-            # Prepare comments with proper positions
             comments = []
-            for item in all_suggestions:
-                formatted_suggestion = f"""🚨 **Code Review**:
-                
-{item['suggestion']}
-
-**Impact**: This could affect {item['filename']}
-"""
+            for item in suggestions:
                 comments.append({
                     'path': item['filename'],
                     'position': item['line_number'],
-                    'body': formatted_suggestion
+                    'body': f"🔍 **Code Review**:\n\n{item['suggestion']}\n\n**Impact**: {item['filename']} line {item['line_number']}"
                 })
-
-            # Create review in one API call
+            
             pr.create_review(
                 commit=pr.head.sha,
-                body="Automated code review suggestions",
+                body="Automated code review completed",
                 event="COMMENT",
                 comments=comments
             )
             print(f"Posted {len(comments)} comments successfully")
             return True
-            
-        except GithubException as e:
-            print(f"GitHub API error: {str(e)}")
-            # Fallback to individual comments if batch fails
-            return self._post_comments_individually(pr, all_suggestions)
         except Exception as e:
-            print(f"Failed to post comments: {str(e)}")
+            print(f"Failed to post review: {str(e)}")
             return False
 
-    def _post_comments_individually(self, pr, all_suggestions):
-        """Fallback method for posting comments one by one"""
-        success_count = 0
-        for item in all_suggestions:
-            try:
-                pr.create_review_comment(
-                    body=f"🔍 **Code Review**: {item['suggestion']}",
-                    commit=pr.head,
-                    path=item['filename'],
-                    line=item['line_number'],
-                )
-                success_count += 1
-                time.sleep(2)  # Rate limiting
-            except Exception as e:
-                print(f"Failed to post comment for {item['filename']} line {item['line_number']}: {str(e)}")
-        
-        print(f"Posted {success_count}/{len(all_suggestions)} comments individually")
-        return success_count > 0
-
     def run(self):
-        """Main execution flow with error handling"""
+        """Main execution flow"""
         try:
             pr = self.get_pr_details()
             changed_files = self.get_changed_files(pr)
@@ -184,33 +204,29 @@ class CodeReviewer:
                 print("No changed code files found")
                 return
             
-            # Collect all suggestions first
-            all_suggestions = []
+            suggestions = []
             for file in changed_files:
                 print(f"\nAnalyzing {file['filename']}...")
                 
-                # Analyze individual changed hunks
                 if file['patch']:
-                    for line_num, code_block in self.parse_patch(file['patch']):
-                        suggestion = self.analyze_code(code_block)
+                    for line_num, code in self.parse_patch(file['patch']):
+                        suggestion = self.analyze_code(code)
                         if suggestion:
-                            print(f"Found issue at line {line_num}: {suggestion[:100]}...")
-                            all_suggestions.append({
+                            suggestions.append({
                                 'filename': file['filename'],
                                 'line_number': line_num,
                                 'suggestion': suggestion
                             })
             
-            # Post all suggestions
-            if all_suggestions:
-                self.post_comments(pr, all_suggestions)
+            if suggestions:
+                self.post_review(pr, suggestions)
             else:
                 print("\nNo significant issues found")
             
-            print("\nReview completed")
+            print("\nReview completed successfully")
             
         except Exception as e:
-            print(f"\nCritical error: {str(e)}")
+            print(f"\nReview failed: {str(e)}")
             raise
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-permission:
+permissions:
   pull-request: write
   contents: read
 

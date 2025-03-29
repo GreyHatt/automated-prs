@@ -155,31 +155,21 @@ class CodeReviewer:
             return None
 
     def post_comment(self, pr, filename, line_number, suggestion):
-        """Post a single review comment with proper commit reference"""
+        """Post a comment with proper multi-line handling"""
         try:
-            # Get the commit list for the PR
-            commits = pr.get_commits()
-            if commits.totalCount == 0:
-                print("No commits found in PR")
-                return False
+            # Truncate very long suggestions
+            if len(suggestion) > 500:
+                suggestion = suggestion[:500] + "... [truncated]"
                 
-            # Use the most recent commit
-            commit = commits[commits.totalCount - 1]
-            
-            print(f"Attempting to post comment on {filename} line {line_number}")
-            
-            # Create the comment
-            pr.create_review_comment(
-                body=f"🔍 **Code Review**: {suggestion}",
-                commit=commit,
+            review = pr.create_review()
+            review.create_comment(
+                body=f"🔍 **Code Review**:\n\n{suggestion}",
                 path=filename,
                 line=line_number,
             )
-            time.sleep(2)  # More conservative rate limiting
+            review.submit()
+            time.sleep(2)
             return True
-        except GithubException as e:
-            print(f"GitHub API error: {str(e)}")
-            return False
         except Exception as e:
             print(f"Failed to post comment: {str(e)}")
             return False

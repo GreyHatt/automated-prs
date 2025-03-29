@@ -89,10 +89,11 @@ class CodeReviewer:
 
     def post_comments(self, pr, analysis_results):
         """Post review comments to GitHub PR"""
+        commit = pr.get_commit(pr.head.sha)
         for result in analysis_results:
             pr.create_review_comment(
                 body="\n".join([f"🔍 **Suggestion**: {s}" for s in result['suggestions']]),
-                commit=pr.head.sha,
+                commit=commit,
                 path=result['file_path'],
                 line=result['line_number'],
             )

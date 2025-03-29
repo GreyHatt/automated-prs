@@ -92,10 +92,11 @@ class CodeReviewer:
         for result in analysis_results:
             pr.create_review_comment(
                 body="\n".join([f"🔍 **Suggestion**: {s}" for s in result['suggestions']]),
-                commit_id=pr.head.sha,
+                commit=pr.head.sha,
                 path=result['file_path'],
                 line=result['line_number'],
             )
+
 
     def run(self):
         pr = self.get_pr_details()

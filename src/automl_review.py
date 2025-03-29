@@ -45,6 +45,22 @@ class CodeReviewer:
         )
         self.repo = self.github.get_repo(self.repo_name)
 
+    def get_pr_details(self):
+        """Get PR details from GitHub event payload"""
+        try:
+            with open(self.event_path, 'r') as f:
+                event_data = json.load(f)
+            
+            # Extract PR number from the event data
+            pr_number = event_data['number']
+            pr = self.repo.get_pull(pr_number)
+            
+            return pr
+            
+        except Exception as e:
+            print(f"Error retrieving PR details: {str(e)}")
+            raise
+
     def analyze_code(self, code_block):
         """Enhanced code analysis to catch syntax errors and logical issues"""
         try:

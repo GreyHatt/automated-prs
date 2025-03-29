@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 from github import Github, GithubException
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from dotenv import load_dotenv
@@ -82,34 +83,76 @@ class CodeReviewer:
         return changed_files
 
     def analyze_code(self, file_content):
-        """Analyze code using the model"""
+        """Analyze code using the model with better prompt engineering"""
         try:
+            # Add context to help the model generate better suggestions
+            prompt = f"""
+            Analyze this code for potential improvements. Focus on:
+            - Syntax errors
+            - Code style violations
+            - Performance optimizations
+            - Security vulnerabilities
+            - Best practices
+            
+            Code to review:
+            {file_content}
+            
+            Suggestions:
+            """
+            
             inputs = self.tokenizer(
-                file_content, 
+                prompt, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=512
+                max_length=1024
             )
-            outputs = self.model.generate(**inputs)
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=100,
+                num_beams=5,
+                early_stopping=True
+            )
             suggestion = self.tokenizer.decode(
                 outputs[0], 
                 skip_special_tokens=True
             )
-            return suggestion if suggestion.strip() else None
+            
+            # Clean up the suggestion
+            suggestion = suggestion.strip()
+            suggestion = re.sub(r'<[^>]+>', '', suggestion)  # Remove any HTML-like tags
+            suggestion = re.sub(r'^\W+', '', suggestion)  # Remove leading non-word chars
+            
+            return suggestion if suggestion and len(suggestion) > 10 else None
+            
         except Exception as e:
             print(f"Failed to analyze code: {str(e)}")
             return None
 
     def post_comment(self, pr, filename, line_number, suggestion):
-        """Post a single review comment"""
+        """Post a single review comment with better validation"""
         try:
+            # Validate the suggestion first
+            if not suggestion or len(suggestion) < 10:
+                print(f"Skipping invalid suggestion: {suggestion}")
+                return False
+                
+            if any(tag in suggestion.lower() for tag in ['<e0>', '<msg>', '<code>']):
+                print(f"Skipping suggestion with invalid tags: {suggestion}")
+                return False
+                
+            print(f"Posting comment on {filename} line {line_number}: {suggestion}")
+            
             pr.create_review_comment(
                 body=f"🔍 **Code Review Suggestion**: {suggestion}",
                 commit=pr.head,
                 path=filename,
                 line=line_number,
             )
+            time.sleep(1)  # Rate limiting
             return True
+        except GithubException as e:
+            print(f"GitHub API error: {str(e)}")
+            return False
         except Exception as e:
             print(f"Failed to post comment: {str(e)}")
             return False
@@ -127,21 +170,22 @@ class CodeReviewer:
             for file in changed_files:
                 print(f"\nAnalyzing {file['filename']}...")
                 
-                # Analyze the entire file content
-                suggestion = self.analyze_code(file['head_content'])
-                if suggestion:
-                    print(f"General suggestion for {file['filename']}: {suggestion}")
-                    # Post as general comment on first line
-                    self.post_comment(pr, file['filename'], 1, suggestion)
+                # Analyze the entire file content first
+                file_suggestion = self.analyze_code(file['head_content'])
+                if file_suggestion:
+                    print(f"General suggestion for file: {file_suggestion}")
+                    if not self.post_comment(pr, file['filename'], 1, file_suggestion):
+                        print("Failed to post general file suggestion")
                 
-                # Analyze individual changed lines from patch
+                # Then analyze individual changed lines
                 if file['patch']:
                     for line_num, line in self.parse_patch(file['patch']):
                         line_suggestion = self.analyze_code(line)
                         if line_suggestion:
                             print(f"Line {line_num} suggestion: {line_suggestion}")
-                            self.post_comment(pr, file['filename'], line_num, line_suggestion)
-                            time.sleep(1)  # Rate limiting
+                            if not self.post_comment(pr, file['filename'], line_num, line_suggestion):
+                                print(f"Failed to post comment for line {line_num}")
+                                continue
             
             print("\nReview completed successfully")
             
@@ -151,6 +195,9 @@ class CodeReviewer:
 
     def parse_patch(self, patch_text):
         """Parse patch to get changed lines and their numbers"""
+        if not patch_text:
+            return []
+            
         lines = patch_text.split('\n')
         current_line = None
         results = []

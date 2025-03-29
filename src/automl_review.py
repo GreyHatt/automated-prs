@@ -154,62 +154,89 @@ class CodeReviewer:
             print(f"Failed to analyze code: {str(e)}")
             return None
 
-    def post_comment(self, pr, filename, line_number, suggestion):
-        """Post a comment with proper multi-line handling"""
+    def post_comments(self, pr, all_suggestions):
+        """Post all comments in a single review with proper submission"""
+        if not all_suggestions:
+            print("No valid suggestions to post")
+            return False
+
         try:
-            # Truncate very long suggestions
-            if len(suggestion) > 500:
-                suggestion = suggestion[:500] + "... [truncated]"
+            # Create a review with all comments at once
+            review_comments = []
+            for item in all_suggestions:
+                formatted_suggestion = f"""🚨 **Code Review - Important Suggestion**:
                 
-            review = pr.create_review()
-            review.create_comment(
-                body=f"🔍 **Code Review**:\n\n{suggestion}",
-                path=filename,
-                line=line_number,
+    {item['suggestion']}
+
+    **Impact**: This is a significant issue that could affect functionality, security, or performance.
+    """
+                review_comments.append({
+                    'path': item['filename'],
+                    'position': item['line_number'],
+                    'body': formatted_suggestion
+                })
+
+            # Submit the review with all comments
+            pr.create_review(
+                commit=pr.head,
+                body="Automated code review with suggested changes",
+                event="COMMENT",  # Use COMMENT instead of REQUEST_CHANGES to be less intrusive
+                comments=review_comments
             )
-            review.submit()
-            time.sleep(2)
+            print(f"Successfully posted {len(review_comments)} comments")
             return True
+        except GithubException as e:
+            print(f"GitHub API error: {str(e)}")
+            return False
         except Exception as e:
-            print(f"Failed to post comment: {str(e)}")
+            print(f"Failed to post comments: {str(e)}")
             return False
 
     def parse_patch(self, patch_text):
-        """Parse patch to get meaningful code changes"""
+        """Parse patch to get meaningful code changes with positions"""
         if not patch_text:
             return []
             
         lines = patch_text.split('\n')
-        current_line = None
+        current_position = None
         results = []
-        min_context_lines = 3  # Include surrounding context
+        current_hunk_lines = []
+        hunk_start_line = None
         
         for line in lines:
             if line.startswith('@@ '):
+                # Save previous hunk if we have one
+                if current_hunk_lines and hunk_start_line is not None:
+                    code_block = '\n'.join([l[1:] if l.startswith('+') else l for l in current_hunk_lines])
+                    if len(code_block.strip()) > 20:
+                        results.append((hunk_start_line, code_block))
+                
+                # Start new hunk
+                current_hunk_lines = []
                 parts = line.split(' ')
                 if len(parts) >= 3:
                     new_part = parts[2]
                     new_start = new_part.split(',')[0][1:]
                     try:
-                        current_line = int(new_start)
+                        hunk_start_line = int(new_start)
+                        current_position = hunk_start_line
                     except ValueError:
-                        current_line = None
-            elif current_line is not None:
-                if line.startswith('+') and not line.startswith('++'):
-                    # Capture some context around changes
-                    context = []
-                    idx = lines.index(line)
-                    for i in range(max(0, idx-min_context_lines), min(idx+min_context_lines+1, len(lines))):
-                        context_line = lines[i]
-                        if not context_line.startswith('@') and not context_line.startswith('++') and not context_line.startswith('--'):
-                            context.append(context_line[1:] if context_line.startswith('+') else context_line)
-                    
-                    code_block = '\n'.join(context)
-                    if len(code_block.strip()) > 10:  # Only include meaningful changes
-                        results.append((current_line, code_block))
-                    current_line += 1
-                elif line.startswith(' '):
-                    current_line += 1
+                        hunk_start_line = None
+                        current_position = None
+            
+            elif current_position is not None:
+                if line.startswith('+') or line.startswith(' '):
+                    current_hunk_lines.append(line)
+                    if line.startswith('+') and not line.startswith('++'):
+                        current_position += 1
+                elif line.startswith('-'):
+                    current_hunk_lines.append(line)
+        
+        # Add the last hunk if it exists
+        if current_hunk_lines and hunk_start_line is not None:
+            code_block = '\n'.join([l[1:] if l.startswith('+') else l for l in current_hunk_lines])
+            if len(code_block.strip()) > 20:
+                results.append((hunk_start_line, code_block))
                     
         return results
 
@@ -223,33 +250,40 @@ class CodeReviewer:
                 print("No changed code files found")
                 return
             
+            # Collect all suggestions first
+            all_suggestions = []
             for file in changed_files:
                 print(f"\nAnalyzing {file['filename']}...")
                 
-                # Analyze individual changed lines first
+                # Analyze individual changed hunks
                 if file['patch']:
-                    line_suggestions = []
-                    for line_num, line in self.parse_patch(file['patch']):
-                        if len(line.strip()) == 0:
-                            continue
-                            
-                        suggestion = self.analyze_code(line)
+                    for line_num, code_block in self.parse_patch(file['patch']):
+                        suggestion = self.analyze_code(code_block)
                         if suggestion:
-                            print(f"Line {line_num} suggestion: {suggestion}")
-                            line_suggestions.append((line_num, suggestion))
-                    
-                    # Post line comments in reverse order (avoids line number shifting issues)
-                    for line_num, suggestion in reversed(line_suggestions):
-                        if not self.post_comment(pr, file['filename'], line_num, suggestion):
-                            print(f"Failed to post comment for line {line_num}")
-                            continue
+                            print(f"Found issue at line {line_num}: {suggestion[:100]}...")
+                            all_suggestions.append({
+                                'filename': file['filename'],
+                                'line_number': line_num,
+                                'suggestion': suggestion
+                            })
                 
-                # Then analyze the entire file for general suggestions
+                # Analyze the entire file for architectural issues
                 file_suggestion = self.analyze_code(file['head_content'])
                 if file_suggestion:
-                    print(f"General file suggestion: {file_suggestion}")
-                    if not self.post_comment(pr, file['filename'], 1, file_suggestion):
-                        print("Failed to post general file suggestion")
+                    print(f"Found file-level issue: {file_suggestion[:100]}...")
+                    all_suggestions.append({
+                        'filename': file['filename'],
+                        'line_number': 1,
+                        'suggestion': file_suggestion
+                    })
+            
+            # Post all suggestions in a single review
+            if all_suggestions:
+                print(f"\nPosting {len(all_suggestions)} significant suggestions...")
+                if not self.post_comments(pr, all_suggestions):
+                    print("Failed to post some comments")
+            else:
+                print("\nNo significant issues found - code looks good!")
             
             print("\nReview completed successfully")
             

@@ -44,6 +44,59 @@ class CodeReviewer:
             retry=3
         )
         self.repo = self.github.get_repo(self.repo_name)
+    
+    def should_skip_file(self, filename):
+        """Check if file should be skipped"""
+        return any(skip in filename for skip in self.skip_files)
+    
+    def get_pr_details(self):
+        """Fetch the PR details from GitHub event data"""
+        try:
+            with open(self.event_path, 'r') as f:
+                event_data = json.load(f)
+            pr_number = event_data['number']
+            print(f"Processing PR #{pr_number}")
+            return self.repo.get_pull(pr_number)
+        except Exception as e:
+            print(f"Failed to get PR details: {str(e)}")
+            raise
+    
+    def get_changed_files(self, pr):
+        """Get all changed files with their contents"""
+        changed_files = []
+        base_sha = pr.base.sha
+        head_sha = pr.head.sha
+        
+        comparison = self.repo.compare(base_sha, head_sha)
+        
+        for file in comparison.files:
+            if file.status != 'modified' and file.status != 'added':
+                continue
+                
+            if self.should_skip_file(file.filename):
+                print(f"Skipping reviewer file: {file.filename}")
+                continue
+                
+            if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java', '.ts', '.go']):
+                print(f"Skipping non-code file: {file.filename}")
+                continue
+                
+            try:
+                # Get file content at HEAD
+                head_content = self.repo.get_contents(file.filename, ref=head_sha).decoded_content.decode()
+                
+                changed_files.append({
+                    'filename': file.filename,
+                    'head_content': head_content,
+                    'patch': file.patch
+                })
+                print(f"Found changed file: {file.filename}")
+                
+            except Exception as e:
+                print(f"Couldn't get contents for {file.filename}: {str(e)}")
+                continue
+                
+        return changed_files
 
     def analyze_code(self, code_block):
         """Enhanced code analysis to catch syntax errors and logical issues"""

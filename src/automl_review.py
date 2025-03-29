@@ -101,20 +101,21 @@ class CodeReviewer:
     def analyze_code(self, code_block):
         """Enhanced code analysis to catch syntax errors and logical issues"""
         try:
-            # More specific prompt to catch errors
+            # More specific prompt to catch JavaScript issues
             prompt = f"""
-            Analyze this Python code for:
+            Analyze this JavaScript code for:
             1. Syntax errors (missing operators, incomplete statements)
-            2. Logical errors (incorrect operations)
-            3. Undefined variables
-            4. Missing return values
-            5. Function definition issues
+            2. Missing semicolons
+            3. Incorrect operations or wrong use of operators
+            4. Undefined variables or functions
+            5. Logical issues (e.g., incorrect conditional expressions, incorrect loops)
+            6. Empty or unnecessary statements (e.g., empty return or expression statements)
 
             Ignore whitespace and formatting unless it affects functionality.
-            
+
             Code:
             {code_block}
-            
+
             Issues Found:
             """
             
@@ -139,8 +140,8 @@ class CodeReviewer:
             # Filter for meaningful suggestions
             if not suggestion or len(suggestion.split()) < 5:
                 return None
-                
-            # Skip generic suggestions
+                    
+            # Skip generic suggestions (such as whitespace or formatting)
             skip_phrases = [
                 'add documentation',
                 'improve variable names',
@@ -152,7 +153,6 @@ class CodeReviewer:
                 return None
                 
             return suggestion
-            
         except Exception as e:
             print(f"Error analyzing code: {str(e)}")
             return None

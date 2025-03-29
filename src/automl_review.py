@@ -99,17 +99,17 @@ class CodeReviewer:
         return changed_files
 
     def analyze_code(self, code_block):
-        """Enhanced code analysis to catch syntax errors and logical issues"""
+        """Enhanced code analysis to catch syntax errors, optimizations, and function issues"""
         try:
-            # More specific prompt to catch JavaScript issues
+            # More specific prompt for code issues such as optimizations, function issues, syntax errors
             prompt = f"""
-            Analyze this JavaScript code for:
+            Analyze this code for:
             1. Syntax errors (missing operators, incomplete statements)
-            2. Missing semicolons
-            3. Incorrect operations or wrong use of operators
-            4. Undefined variables or functions
-            5. Logical issues (e.g., incorrect conditional expressions, incorrect loops)
-            6. Empty or unnecessary statements (e.g., empty return or expression statements)
+            2. Function issues (incorrect usage of functions, missing arguments, incorrect return values)
+            3. Code optimizations (inefficient code or redundant code)
+            4. Logical errors (incorrect operations, wrong operators, etc.)
+            5. Missing or incorrect use of predefined functions
+            6. Unnecessary variables or functions
 
             Ignore whitespace and formatting unless it affects functionality.
 
@@ -140,8 +140,8 @@ class CodeReviewer:
             # Filter for meaningful suggestions
             if not suggestion or len(suggestion.split()) < 5:
                 return None
-                    
-            # Skip generic suggestions (such as whitespace or formatting)
+
+            # Skip generic suggestions like whitespace or formatting
             skip_phrases = [
                 'add documentation',
                 'improve variable names',
@@ -156,6 +156,7 @@ class CodeReviewer:
         except Exception as e:
             print(f"Error analyzing code: {str(e)}")
             return None
+
 
     def post_comments(self, pr, all_suggestions):
         """Post all comments in a single review with proper submission"""

@@ -8,14 +8,14 @@ def add_numbers(a, b):
 
 def add_numbers_2(a, b):
     """Function to add two numbers and print"""
-    result = a + b
+    result = a  b
     print(f"Result: {result}")
     return result
 
 
 def subtract_numbers(a, b):
     """Function to subtract two numbers"""
-    return a - b
+    return 
 
 if __name__ == "__main__":
     hello_world()

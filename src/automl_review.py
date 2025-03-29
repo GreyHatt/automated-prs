@@ -54,6 +54,7 @@ class CodeReviewer:
             with open(self.event_path, 'r') as f:
                 event_data = json.load(f)
             pr_number = event_data['number']
+            print(f"Processing PR #{pr_number}")
             return self.repo.get_pull(pr_number)
         except Exception as e:
             print(f"Failed to get PR details: {str(e)}")
@@ -62,21 +63,30 @@ class CodeReviewer:
     def parse_diff(self, diff_text):
         """Parse unified diff to extract changed lines with positions"""
         changes = []
+        if not diff_text:
+            print("Empty diff text received")
+            return changes
+
         lines = diff_text.split('\n')
         file_path = None
         current_line = None
         
+        print(f"Parsing diff with {len(lines)} lines")
+        
         for line in lines:
             if line.startswith('+++ b/'):
                 file_path = line[6:]
+                print(f"Found file: {file_path}")
             elif line.startswith('@@ '):
                 parts = line.split(' ')
-                new_part = parts[2]
-                new_start = new_part.split(',')[0][1:]
-                try:
-                    current_line = int(new_start)
-                except ValueError:
-                    current_line = 1
+                if len(parts) >= 3:
+                    new_part = parts[2]
+                    new_start = new_part.split(',')[0][1:]
+                    try:
+                        current_line = int(new_start)
+                        print(f"Found new chunk starting at line {current_line}")
+                    except ValueError:
+                        current_line = 1
             elif line.startswith('+') and not line.startswith('++'):
                 if file_path and current_line is not None:
                     changes.append({
@@ -84,17 +94,24 @@ class CodeReviewer:
                         'line_number': current_line,
                         'content': line[1:]
                     })
+                    print(f"Found added line at {file_path}:{current_line}")
                 current_line += 1
             elif line.startswith(' '):
                 current_line += 1
         
+        print(f"Found {len(changes)} changes in file {file_path}")
         return changes
 
     def analyze_code(self, code_snippets):
         """Analyze code snippets using the model"""
         results = []
+        print(f"Analyzing {len(code_snippets)} code snippets")
+        
         for snippet in code_snippets:
             try:
+                if not snippet['content'].strip():
+                    continue
+                    
                 inputs = self.tokenizer(
                     snippet["content"], 
                     return_tensors="pt", 
@@ -113,8 +130,9 @@ class CodeReviewer:
                         'line_number': snippet['line_number'],
                         'suggestions': [suggestion]
                     })
+                    print(f"Generated suggestion for {snippet['file_path']}:{snippet['line_number']}")
             except Exception as e:
-                print(f"Failed to analyze code: {str(e)}")
+                print(f"Failed to analyze code at {snippet['file_path']}:{snippet['line_number']}: {str(e)}")
                 continue
         
         return results
@@ -133,12 +151,13 @@ class CodeReviewer:
                     if result['suggestions']:
                         review_comments.append({
                             'path': result['file_path'],
-                            'position': result['line_number'],  # Simplified position
+                            'position': result['line_number'],
                             'body': "\n".join([f"🔍 **Code Review Suggestion**: {s}" for s in result['suggestions']])
                         })
                         time.sleep(1)  # Rate limiting
                 
                 if review_comments:
+                    print(f"Posting {len(review_comments)} comments to GitHub")
                     pr.create_review(
                         commit=commit,
                         body="Automated code review suggestions",
@@ -151,7 +170,7 @@ class CodeReviewer:
                 if attempt == max_attempts - 1:
                     print(f"GitHub API error after {max_attempts} attempts: {str(e)}")
                     raise
-                wait_time = (2 ** attempt)  # Exponential backoff
+                wait_time = (2 ** attempt)
                 print(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             except Exception as e:
@@ -162,37 +181,51 @@ class CodeReviewer:
         """Main execution flow"""
         try:
             pr = self.get_pr_details()
-            files = pr.get_files()
+            files = list(pr.get_files())
+            print(f"Found {len(files)} files in PR")
             
             all_changes = []
             for file in files:
-                if file.filename.endswith(('.py', '.js', '.java', '.go', '.ts', '.cpp', '.h')):
-                    if file.patch:
-                        changes = self.parse_diff(file.patch)
-                        all_changes.extend(changes)
+                print(f"\nProcessing file: {file.filename}")
+                if not file.filename.endswith(('.py', '.js', '.java', '.go', '.ts', '.cpp', '.h', '.rb', '.php', '.sh')):
+                    print(f"Skipping non-code file: {file.filename}")
+                    continue
+                
+                if file.patch:
+                    print(f"Found patch for {file.filename} ({len(file.patch)} chars)")
+                    changes = self.parse_diff(file.patch)
+                    all_changes.extend(changes)
+                else:
+                    print(f"No patch available for {file.filename} (possibly binary file)")
             
             if all_changes:
-                print(f"Found {len(all_changes)} changes to analyze")
+                print(f"\nFound {len(all_changes)} changes to analyze")
                 analysis_results = self.analyze_code(all_changes)
                 if analysis_results:
-                    print(f"Posting {len(analysis_results)} suggestions")
+                    print(f"\nPosting {len(analysis_results)} suggestions")
                     success = self.post_comments(pr, analysis_results)
                     if success:
                         print("Comments posted successfully")
                     else:
                         print("No comments were posted")
                 else:
-                    print("No suggestions generated")
+                    print("No suggestions generated by the model")
             else:
-                print("No code changes found to analyze")
+                print("\nNo code changes found to analyze. Details:")
+                print(f"- Total files in PR: {len(files)}")
+                print(f"- Files with patches: {sum(1 for f in files if f.patch)}")
+                print(f"- Files without patches: {sum(1 for f in files if not f.patch)}")
+                print("Supported file extensions: .py, .js, .java, .go, .ts, .cpp, .h, .rb, .php, .sh")
         except Exception as e:
-            print(f"Error in code review process: {str(e)}")
+            print(f"\nError in code review process: {str(e)}")
             raise
 
 if __name__ == "__main__":
     try:
+        print("Starting code review process...")
         reviewer = CodeReviewer()
         reviewer.run()
+        print("Process completed")
     except Exception as e:
-        print(f"Critical error: {str(e)}")
+        print(f"\nCritical error: {str(e)}")
         exit(1)

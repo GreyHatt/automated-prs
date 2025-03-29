@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permission:
+  pull-request: write
+  contents: read
+
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -28,7 +32,7 @@ jobs:
         run: |
           python src/automl_review.py
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}

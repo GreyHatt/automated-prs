@@ -39,71 +39,18 @@ class CodeReviewer:
         # Initialize GitHub client
         self.github = Github(
             self.gh_token,
-            timeout=60,
+            timeout=120,  # Increased timeout to 120 seconds
             per_page=100,
             retry=3
         )
         self.repo = self.github.get_repo(self.repo_name)
-    
-    def should_skip_file(self, filename):
-        """Check if file should be skipped"""
-        return any(skip in filename for skip in self.skip_files)
-    
-    def get_pr_details(self):
-        """Fetch the PR details from GitHub event data"""
-        try:
-            with open(self.event_path, 'r') as f:
-                event_data = json.load(f)
-            pr_number = event_data['number']
-            print(f"Processing PR #{pr_number}")
-            return self.repo.get_pull(pr_number)
-        except Exception as e:
-            print(f"Failed to get PR details: {str(e)}")
-            raise
-    
-    def get_changed_files(self, pr):
-        """Get all changed files with their contents"""
-        changed_files = []
-        base_sha = pr.base.sha
-        head_sha = pr.head.sha
-        
-        comparison = self.repo.compare(base_sha, head_sha)
-        
-        for file in comparison.files:
-            if file.status != 'modified' and file.status != 'added':
-                continue
-                
-            if self.should_skip_file(file.filename):
-                print(f"Skipping reviewer file: {file.filename}")
-                continue
-                
-            if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java', '.ts', '.go']):
-                print(f"Skipping non-code file: {file.filename}")
-                continue
-                
-            try:
-                # Get file content at HEAD
-                head_content = self.repo.get_contents(file.filename, ref=head_sha).decoded_content.decode()
-                
-                changed_files.append({
-                    'filename': file.filename,
-                    'head_content': head_content,
-                    'patch': file.patch
-                })
-                print(f"Found changed file: {file.filename}")
-                
-            except Exception as e:
-                print(f"Couldn't get contents for {file.filename}: {str(e)}")
-                continue
-                
-        return changed_files
 
     def analyze_code(self, code_block):
-        """Enhanced code analysis to catch syntax errors, optimizations, and function issues"""
+        """Enhanced code analysis to catch syntax errors and logical issues"""
         try:
-            # More specific prompt for code issues such as optimizations, function issues, syntax errors
+            # More specific prompt to catch errors
             prompt = f"""
-            Analyze this code for:
+            Analyze this Python or Javascript or JS code for:
             1. Syntax errors (missing operators, incomplete statements)
             2. Function issues (incorrect usage of functions, missing arguments, incorrect return values)
             3. Code optimizations (inefficient code or redundant code)
@@ -112,10 +59,10 @@ class CodeReviewer:
             6. Unnecessary variables or functions
 
             Ignore whitespace and formatting unless it affects functionality.
-
+            
             Code:
             {code_block}
-
+            
             Issues Found:
             """
             
@@ -140,8 +87,8 @@ class CodeReviewer:
             # Filter for meaningful suggestions
             if not suggestion or len(suggestion.split()) < 5:
                 return None
-
-            # Skip generic suggestions like whitespace or formatting
+                
+            # Skip generic suggestions
             skip_phrases = [
                 'add documentation',
                 'improve variable names',
@@ -153,48 +100,10 @@ class CodeReviewer:
                 return None
                 
             return suggestion
+            
         except Exception as e:
             print(f"Error analyzing code: {str(e)}")
             return None
-
-
-    def post_comments(self, pr, all_suggestions):
-        """Post all comments in a single review with proper submission"""
-        if not all_suggestions:
-            print("No valid suggestions to post")
-            return False
-
-        try:
-            # Create a review with all comments at once
-            review_comments = []
-            for item in all_suggestions:
-                formatted_suggestion = f"""🚨 **Code Review - Important Suggestion**:
-                
-    {item['suggestion']}
-
-    **Impact**: This is a significant issue that could affect functionality, security, or performance.
-    """
-                review_comments.append({
-                    'path': item['filename'],
-                    'position': item['line_number'],
-                    'body': formatted_suggestion
-                })
-
-            # Submit the review with all comments
-            pr.create_review(
-                commit=pr.head,
-                body="Automated code review with suggested changes",
-                event="COMMENT",  # Use COMMENT instead of REQUEST_CHANGES to be less intrusive
-                comments=review_comments
-            )
-            print(f"Successfully posted {len(review_comments)} comments")
-            return True
-        except GithubException as e:
-            print(f"GitHub API error: {str(e)}")
-            return False
-        except Exception as e:
-            print(f"Failed to post comments: {str(e)}")
-            return False
 
     def parse_patch(self, patch_text):
         """Parse patch to get code changes with context"""
@@ -234,7 +143,7 @@ class CodeReviewer:
         return results
 
     def run(self):
-        """Main execution flow"""
+        """Main execution flow with enhanced error detection"""
         try:
             pr = self.get_pr_details()
             changed_files = self.get_changed_files(pr)
@@ -243,45 +152,57 @@ class CodeReviewer:
                 print("No changed code files found")
                 return
             
-            # Collect all suggestions first
-            all_suggestions = []
+            suggestions = []
             for file in changed_files:
                 print(f"\nAnalyzing {file['filename']}...")
                 
-                # Analyze individual changed hunks
                 if file['patch']:
-                    for line_num, code_block in self.parse_patch(file['patch']):
-                        suggestion = self.analyze_code(code_block)
-                        if suggestion:
-                            print(f"Found issue at line {line_num}: {suggestion[:100]}...")
-                            all_suggestions.append({
-                                'filename': file['filename'],
-                                'line_number': line_num,
-                                'suggestion': suggestion
-                            })
-                
-                # Analyze the entire file for architectural issues
-                file_suggestion = self.analyze_code(file['head_content'])
-                if file_suggestion:
-                    print(f"Found file-level issue: {file_suggestion[:100]}...")
-                    all_suggestions.append({
-                        'filename': file['filename'],
-                        'line_number': 1,
-                        'suggestion': file_suggestion
-                    })
+                    for line_num, code in self.parse_patch(file['patch']):
+                        # Focus on lines with actual code changes
+                        if any(op in code for op in ['+', '-', '*', '/', '=', 'return']):
+                            suggestion = self.analyze_code(code)
+                            if suggestion:
+                                print(f"Found issue at line {line_num}: {suggestion[:100]}...")
+                                suggestions.append({
+                                    'filename': file['filename'],
+                                    'line_number': line_num,
+                                    'suggestion': suggestion
+                                })
             
-            # Post all suggestions in a single review
-            if all_suggestions:
-                print(f"\nPosting {len(all_suggestions)} significant suggestions...")
-                if not self.post_comments(pr, all_suggestions):
-                    print("Failed to post some comments")
+            if suggestions:
+                self.post_review(pr, suggestions)
             else:
-                print("\nNo significant issues found - code looks good!")
+                print("\nNo significant issues found")
             
             print("\nReview completed successfully")
             
         except Exception as e:
-            print(f"\nError in code review process: {str(e)}")
+            print(f"\nReview failed: {str(e)}")
+            raise
+
+    def post_review(self, pr, suggestions):
+        """Post suggestions as review comments on the pull request"""
+        try:
+            for suggestion in suggestions:
+                # Skip trivial suggestions (e.g., blank line issues)
+                if "blank line" in suggestion['suggestion'].lower() or "extra space" in suggestion['suggestion'].lower():
+                    continue
+
+                # Debugging: Log the suggestion before posting
+                print(f"Posting review for: {suggestion}")
+
+                # Check that the line_number and path are correct
+                print(f"Posting comment at line {suggestion['line_number']} in {suggestion['filename']}")
+
+                pr.create_review_comment(
+                    body=f"Issue: {suggestion['suggestion']}",
+                    commit_id=pr.head.sha,  # Ensure this is correct
+                    path=suggestion['filename'],
+                    position=suggestion['line_number']
+                )
+            print("Successfully posted review comments.")
+        except GithubException as e:
+            print(f"Failed to post comments: {str(e)}")
             raise
 
 if __name__ == "__main__":

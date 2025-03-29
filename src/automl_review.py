@@ -15,6 +15,12 @@ class CodeReviewer:
         self.repo_name = os.getenv("GITHUB_REPOSITORY")
         self.event_path = os.getenv("GITHUB_EVENT_PATH")
         
+        # Files to skip (reviewer's own files)
+        self.skip_files = [
+            'src/automl_review.py',
+            '.github/workflows/'
+        ]
+        
         # Initialize models
         try:
             print("Initializing CodeReviewer model...")
@@ -32,6 +38,10 @@ class CodeReviewer:
         except GithubException as e:
             print(f"GitHub API connection failed: {str(e)}")
             raise
+
+    def should_skip_file(self, filename):
+        """Check if file should be skipped"""
+        return any(skip in filename for skip in self.skip_files)
 
     def get_pr_details(self):
         """Fetch the PR details from GitHub event data"""
@@ -54,10 +64,14 @@ class CodeReviewer:
         comparison = self.repo.compare(base_sha, head_sha)
         
         for file in comparison.files:
-            if file.status != 'modified':
+            if file.status != 'modified' and file.status != 'added':
                 continue
                 
-            if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java']):
+            if self.should_skip_file(file.filename):
+                print(f"Skipping reviewer file: {file.filename}")
+                continue
+                
+            if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java', '.ts', '.go']):
                 print(f"Skipping non-code file: {file.filename}")
                 continue
                 
@@ -65,13 +79,9 @@ class CodeReviewer:
                 # Get file content at HEAD
                 head_content = self.repo.get_contents(file.filename, ref=head_sha).decoded_content.decode()
                 
-                # Get file content at BASE
-                base_content = self.repo.get_contents(file.filename, ref=base_sha).decoded_content.decode()
-                
                 changed_files.append({
                     'filename': file.filename,
                     'head_content': head_content,
-                    'base_content': base_content,
                     'patch': file.patch
                 })
                 print(f"Found changed file: {file.filename}")
@@ -85,17 +95,18 @@ class CodeReviewer:
     def analyze_code(self, file_content):
         """Analyze code using the model with better prompt engineering"""
         try:
-            # Add context to help the model generate better suggestions
             prompt = f"""
-            Analyze this code for potential improvements. Focus on:
-            - Syntax errors
-            - Code style violations
-            - Performance optimizations
-            - Security vulnerabilities
-            - Best practices
+            Analyze this code for:
+            1. Syntax errors
+            2. Code style issues
+            3. Potential bugs
+            4. Security vulnerabilities
+            5. Performance optimizations
             
-            Code to review:
-            {file_content}
+            Provide specific, actionable suggestions.
+            
+            Code:
+            {file_content[:2000]}  # Limit to first 2000 chars to avoid token limits
             
             Suggestions:
             """
@@ -119,36 +130,37 @@ class CodeReviewer:
             
             # Clean up the suggestion
             suggestion = suggestion.strip()
-            suggestion = re.sub(r'<[^>]+>', '', suggestion)  # Remove any HTML-like tags
-            suggestion = re.sub(r'^\W+', '', suggestion)  # Remove leading non-word chars
+            suggestion = re.sub(r'<[^>]+>', '', suggestion)
+            suggestion = re.sub(r'^\W+', '', suggestion)
             
-            return suggestion if suggestion and len(suggestion) > 10 else None
+            return suggestion if suggestion and len(suggestion.split()) > 3 else None
             
         except Exception as e:
             print(f"Failed to analyze code: {str(e)}")
             return None
 
     def post_comment(self, pr, filename, line_number, suggestion):
-        """Post a single review comment with better validation"""
+        """Post a single review comment with proper commit reference"""
         try:
-            # Validate the suggestion first
-            if not suggestion or len(suggestion) < 10:
-                print(f"Skipping invalid suggestion: {suggestion}")
+            # Get the commit list for the PR
+            commits = pr.get_commits()
+            if commits.totalCount == 0:
+                print("No commits found in PR")
                 return False
                 
-            if any(tag in suggestion.lower() for tag in ['<e0>', '<msg>', '<code>']):
-                print(f"Skipping suggestion with invalid tags: {suggestion}")
-                return False
-                
-            print(f"Posting comment on {filename} line {line_number}: {suggestion}")
+            # Use the most recent commit
+            commit = commits[commits.totalCount - 1]
             
+            print(f"Attempting to post comment on {filename} line {line_number}")
+            
+            # Create the comment
             pr.create_review_comment(
-                body=f"🔍 **Code Review Suggestion**: {suggestion}",
-                commit=pr.head,
+                body=f"🔍 **Code Review**: {suggestion}",
+                commit=commit,
                 path=filename,
                 line=line_number,
             )
-            time.sleep(1)  # Rate limiting
+            time.sleep(2)  # More conservative rate limiting
             return True
         except GithubException as e:
             print(f"GitHub API error: {str(e)}")
@@ -156,6 +168,34 @@ class CodeReviewer:
         except Exception as e:
             print(f"Failed to post comment: {str(e)}")
             return False
+
+    def parse_patch(self, patch_text):
+        """Parse patch to get changed lines and their numbers"""
+        if not patch_text:
+            return []
+            
+        lines = patch_text.split('\n')
+        current_line = None
+        results = []
+        
+        for line in lines:
+            if line.startswith('@@ '):
+                parts = line.split(' ')
+                if len(parts) >= 3:
+                    new_part = parts[2]
+                    new_start = new_part.split(',')[0][1:]
+                    try:
+                        current_line = int(new_start)
+                    except ValueError:
+                        current_line = None
+            elif current_line is not None:
+                if line.startswith('+') and not line.startswith('++'):
+                    results.append((current_line, line[1:]))
+                    current_line += 1
+                elif line.startswith(' '):
+                    current_line += 1
+                    
+        return results
 
     def run(self):
         """Main execution flow"""
@@ -170,56 +210,36 @@ class CodeReviewer:
             for file in changed_files:
                 print(f"\nAnalyzing {file['filename']}...")
                 
-                # Analyze the entire file content first
+                # Analyze individual changed lines first
+                if file['patch']:
+                    line_suggestions = []
+                    for line_num, line in self.parse_patch(file['patch']):
+                        if len(line.strip()) == 0:
+                            continue
+                            
+                        suggestion = self.analyze_code(line)
+                        if suggestion:
+                            print(f"Line {line_num} suggestion: {suggestion}")
+                            line_suggestions.append((line_num, suggestion))
+                    
+                    # Post line comments in reverse order (avoids line number shifting issues)
+                    for line_num, suggestion in reversed(line_suggestions):
+                        if not self.post_comment(pr, file['filename'], line_num, suggestion):
+                            print(f"Failed to post comment for line {line_num}")
+                            continue
+                
+                # Then analyze the entire file for general suggestions
                 file_suggestion = self.analyze_code(file['head_content'])
                 if file_suggestion:
-                    print(f"General suggestion for file: {file_suggestion}")
+                    print(f"General file suggestion: {file_suggestion}")
                     if not self.post_comment(pr, file['filename'], 1, file_suggestion):
                         print("Failed to post general file suggestion")
-                
-                # Then analyze individual changed lines
-                if file['patch']:
-                    for line_num, line in self.parse_patch(file['patch']):
-                        line_suggestion = self.analyze_code(line)
-                        if line_suggestion:
-                            print(f"Line {line_num} suggestion: {line_suggestion}")
-                            if not self.post_comment(pr, file['filename'], line_num, line_suggestion):
-                                print(f"Failed to post comment for line {line_num}")
-                                continue
             
             print("\nReview completed successfully")
             
         except Exception as e:
             print(f"\nError in code review process: {str(e)}")
             raise
-
-    def parse_patch(self, patch_text):
-        """Parse patch to get changed lines and their numbers"""
-        if not patch_text:
-            return []
-            
-        lines = patch_text.split('\n')
-        current_line = None
-        results = []
-        
-        for line in lines:
-            if line.startswith('@@ '):
-                # Parse the line number from diff header
-                parts = line.split(' ')
-                if len(parts) >= 3:
-                    line_info = parts[2].split(',')[0][1:]
-                    try:
-                        current_line = int(line_info)
-                    except ValueError:
-                        current_line = None
-            elif current_line is not None:
-                if line.startswith('+') and not line.startswith('++'):
-                    results.append((current_line, line[1:]))
-                    current_line += 1
-                elif line.startswith(' '):
-                    current_line += 1
-                    
-        return results
 
 if __name__ == "__main__":
     try:

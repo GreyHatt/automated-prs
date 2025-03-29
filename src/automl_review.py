@@ -93,22 +93,24 @@ class CodeReviewer:
         return changed_files
 
     def analyze_code(self, file_content):
-        """Analyze code using the model with better prompt engineering"""
+        """Analyze code using the model with focused prompt engineering"""
         try:
+            # More specific prompt to focus on code quality
             prompt = f"""
-            Analyze this code for:
-            1. Syntax errors
-            2. Code style issues
-            3. Potential bugs
-            4. Security vulnerabilities
-            5. Performance optimizations
+            Analyze this code for specific improvements in these categories:
+            1. BUGS - Actual code errors that will cause failures
+            2. SECURITY - Potential security vulnerabilities
+            3. PERFORMANCE - Optimizations for speed/memory
+            4. STYLE - Code style violations (PEP8, etc)
+            5. BEST PRACTICES - Better ways to implement
             
-            Provide specific, actionable suggestions.
+            Ignore whitespace and formatting unless it affects functionality.
+            Provide concrete suggestions with explanations.
             
             Code:
-            {file_content[:2000]}  # Limit to first 2000 chars to avoid token limits
+            {file_content[:2000]}
             
-            Suggestions:
+            Analysis:
             """
             
             inputs = self.tokenizer(
@@ -119,21 +121,34 @@ class CodeReviewer:
             )
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=100,
+                max_new_tokens=200,
                 num_beams=5,
-                early_stopping=True
+                early_stopping=True,
+                temperature=0.5,  # Lower temperature for more focused results
+                no_repeat_ngram_size=3
             )
             suggestion = self.tokenizer.decode(
                 outputs[0], 
                 skip_special_tokens=True
             )
             
-            # Clean up the suggestion
+            # Filter suggestions
             suggestion = suggestion.strip()
-            suggestion = re.sub(r'<[^>]+>', '', suggestion)
-            suggestion = re.sub(r'^\W+', '', suggestion)
-            
-            return suggestion if suggestion and len(suggestion.split()) > 3 else None
+            if not suggestion or len(suggestion.split()) < 5:
+                return None
+                
+            # Remove generic suggestions
+            bad_phrases = [
+                "remove blank line",
+                "add space",
+                "extra whitespace",
+                "formatting issue",
+                "indentation"
+            ]
+            if any(phrase.lower() in suggestion.lower() for phrase in bad_phrases):
+                return None
+                
+            return suggestion
             
         except Exception as e:
             print(f"Failed to analyze code: {str(e)}")
@@ -170,13 +185,14 @@ class CodeReviewer:
             return False
 
     def parse_patch(self, patch_text):
-        """Parse patch to get changed lines and their numbers"""
+        """Parse patch to get meaningful code changes"""
         if not patch_text:
             return []
             
         lines = patch_text.split('\n')
         current_line = None
         results = []
+        min_context_lines = 3  # Include surrounding context
         
         for line in lines:
             if line.startswith('@@ '):
@@ -190,7 +206,17 @@ class CodeReviewer:
                         current_line = None
             elif current_line is not None:
                 if line.startswith('+') and not line.startswith('++'):
-                    results.append((current_line, line[1:]))
+                    # Capture some context around changes
+                    context = []
+                    idx = lines.index(line)
+                    for i in range(max(0, idx-min_context_lines), min(idx+min_context_lines+1, len(lines))):
+                        context_line = lines[i]
+                        if not context_line.startswith('@') and not context_line.startswith('++') and not context_line.startswith('--'):
+                            context.append(context_line[1:] if context_line.startswith('+') else context_line)
+                    
+                    code_block = '\n'.join(context)
+                    if len(code_block.strip()) > 10:  # Only include meaningful changes
+                        results.append((current_line, code_block))
                     current_line += 1
                 elif line.startswith(' '):
                     current_line += 1

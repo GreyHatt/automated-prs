@@ -70,6 +70,7 @@ class CodeReviewer:
         lines = diff_text.split('\n')
         file_path = None
         current_line = None
+        in_hunk = False
         
         print(f"Parsing diff with {len(lines)} lines")
         
@@ -84,21 +85,26 @@ class CodeReviewer:
                     new_start = new_part.split(',')[0][1:]
                     try:
                         current_line = int(new_start)
-                        print(f"Found new chunk starting at line {current_line}")
+                        print(f"Found new hunk starting at line {current_line}")
+                        in_hunk = True
                     except ValueError:
                         current_line = 1
-            elif line.startswith('+') and not line.startswith('++'):
-                if file_path and current_line is not None:
-                    changes.append({
-                        'file_path': file_path,
-                        'line_number': current_line,
-                        'content': line[1:]
-                    })
-                    print(f"Found added line at {file_path}:{current_line}")
-                current_line += 1
-            elif line.startswith(' '):
-                current_line += 1
-        
+                        in_hunk = True
+            elif in_hunk:
+                if line.startswith('+') and not line.startswith('++'):
+                    if file_path and current_line is not None:
+                        changes.append({
+                            'file_path': file_path,
+                            'line_number': current_line,
+                            'content': line[1:]
+                        })
+                        print(f"Found added line at {file_path}:{current_line} - {line[:50]}...")
+                    current_line += 1
+                elif line.startswith(' '):
+                    current_line += 1
+                elif line.startswith('diff --git'):
+                    in_hunk = False
+            
         print(f"Found {len(changes)} changes in file {file_path}")
         return changes
 
@@ -149,11 +155,13 @@ class CodeReviewer:
                 review_comments = []
                 for result in analysis_results:
                     if result['suggestions']:
+                        comment_body = "🔍 **Code Review Suggestions**:\n" + "\n".join([f"- {s}" for s in result['suggestions']])
                         review_comments.append({
                             'path': result['file_path'],
                             'position': result['line_number'],
-                            'body': "\n".join([f"🔍 **Code Review Suggestion**: {s}" for s in result['suggestions']])
+                            'body': comment_body
                         })
+                        print(f"Prepared comment for {result['file_path']}:{result['line_number']}")
                         time.sleep(1)  # Rate limiting
                 
                 if review_comments:
@@ -187,14 +195,17 @@ class CodeReviewer:
             all_changes = []
             for file in files:
                 print(f"\nProcessing file: {file.filename}")
-                if not file.filename.endswith(('.py', '.js', '.java', '.go', '.ts', '.cpp', '.h', '.rb', '.php', '.sh')):
+                if not any(file.filename.endswith(ext) for ext in ['.py', '.js', '.java', '.go', '.ts', '.cpp', '.h', '.rb', '.php', '.sh']):
                     print(f"Skipping non-code file: {file.filename}")
                     continue
                 
                 if file.patch:
                     print(f"Found patch for {file.filename} ({len(file.patch)} chars)")
                     changes = self.parse_diff(file.patch)
-                    all_changes.extend(changes)
+                    if changes:
+                        all_changes.extend(changes)
+                    else:
+                        print(f"No changes detected in {file.filename}")
                 else:
                     print(f"No patch available for {file.filename} (possibly binary file)")
             

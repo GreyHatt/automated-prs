@@ -6,7 +6,6 @@ from google.cloud import aiplatform
 from dotenv import load_dotenv
 from diff_match_patch import diff_match_patch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
@@ -120,53 +119,44 @@ class CodeReviewer:
         
         return results
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def post_comments(self, pr, analysis_results):
         """Post review comments to GitHub PR with retry logic"""
-        try:
-            # Get the head commit
-            commit = self.repo.get_commit(pr.head.sha)
-            
-            # Create review comments
-            review_comments = []
-            for result in analysis_results:
-                if result['suggestions']:
-                    review_comments.append({
-                        'path': result['file_path'],
-                        'position': self.get_line_position(pr, result['file_path'], result['line_number']),
-                        'body': "\n".join([f"🔍 **Code Review Suggestion**: {s}" for s in result['suggestions']])
-                    })
-                    time.sleep(1)  # Rate limiting
-            
-            if review_comments:
-                pr.create_review(
-                    commit=commit,
-                    body="Automated code review suggestions",
-                    event="COMMENT",
-                    comments=review_comments
-                )
-                return True
-            return False
-        except GithubException as e:
-            print(f"GitHub API error: {str(e)}")
-            raise
-        except Exception as e:
-            print(f"Failed to post comments: {str(e)}")
-            raise
-
-    def get_line_position(self, pr, file_path, line_number):
-        """Get the correct position in the diff for a given line number"""
-        try:
-            # Get the file diff
-            files = pr.get_files()
-            for file in files:
-                if file.filename == file_path:
-                    # Simple implementation - returns the line number
-                    # For more accurate positioning, parse the diff properly
-                    return line_number
-            return 1  # Fallback
-        except Exception:
-            return 1  # Fallback
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                # Get the head commit
+                commit = self.repo.get_commit(pr.head.sha)
+                
+                # Create review comments
+                review_comments = []
+                for result in analysis_results:
+                    if result['suggestions']:
+                        review_comments.append({
+                            'path': result['file_path'],
+                            'position': result['line_number'],  # Simplified position
+                            'body': "\n".join([f"🔍 **Code Review Suggestion**: {s}" for s in result['suggestions']])
+                        })
+                        time.sleep(1)  # Rate limiting
+                
+                if review_comments:
+                    pr.create_review(
+                        commit=commit,
+                        body="Automated code review suggestions",
+                        event="COMMENT",
+                        comments=review_comments
+                    )
+                    return True
+                return False
+            except GithubException as e:
+                if attempt == max_attempts - 1:
+                    print(f"GitHub API error after {max_attempts} attempts: {str(e)}")
+                    raise
+                wait_time = (2 ** attempt)  # Exponential backoff
+                print(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            except Exception as e:
+                print(f"Failed to post comments: {str(e)}")
+                raise
 
     def run(self):
         """Main execution flow"""

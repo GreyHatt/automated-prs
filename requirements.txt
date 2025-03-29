@@ -4,3 +4,10 @@ isort
 autopep8
 google-cloud
 PyGithub
+transformers
+google-cloud-aiplatform
+PyGithub
+diff-match-patch
+python-dotenv
+torch==1.13.0
+accelerate>=0.26.0
